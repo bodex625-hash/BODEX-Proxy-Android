@@ -7,13 +7,34 @@ import android.content.Intent
 import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import android.os.ParcelFileDescriptor
+import java.util.Locale
 import hev.htproxy.TProxyService
 import java.io.File
 
 class ProxyVpnService : VpnService() {
     private var tun: ParcelFileDescriptor? = null
     private var started = false
+    private val statsHandler = Handler(Looper.getMainLooper())
+    private val statsTicker = object : Runnable {
+        override fun run() {
+            if (!started) return
+            try {
+                val stats = TProxyService.TProxyGetStats()
+                if (stats.size >= 4) {
+                    val uploaded = stats[1].coerceAtLeast(0L)
+                    val downloaded = stats[3].coerceAtLeast(0L)
+                    val total = uploaded + downloaded
+                    showStatus("Up " + formatBytes(uploaded) + " • Down " + formatBytes(downloaded) + " • Total " + formatBytes(total))
+                }
+            } catch (_: Throwable) {
+                showStatus("VPN connected • traffic stats unavailable")
+            }
+            if (started) statsHandler.postDelayed(this, 5000)
+        }
+    }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
@@ -122,12 +143,21 @@ class ProxyVpnService : VpnService() {
         if (!TProxyService.TProxyIsRunning()) {
             error("Hev engine did not remain running. See hev-tunnel.log")
         }
+        statsHandler.removeCallbacks(statsTicker)
+        statsHandler.post(statsTicker)
+    }
+
+    private fun formatBytes(bytes: Long): String {
+        val mb = bytes / (1024.0 * 1024.0)
+        return if (mb >= 1024.0) String.format(Locale.US, "%.2f GB", mb / 1024.0)
+        else String.format(Locale.US, "%.1f MB", mb)
     }
 
     private fun yamlSingle(value: String) = value.replace("'", "''").replace("\\r", "").replace("\\n", "")
 
     @Synchronized
     private fun stopTunnel() {
+        statsHandler.removeCallbacks(statsTicker)
         if (started) {
             try { TProxyService.TProxyStopService() } catch (_: Throwable) { }
             started = false
