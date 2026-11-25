@@ -27,6 +27,11 @@ class ProxyVpnService : VpnService() {
                     val uploaded = stats[1].coerceAtLeast(0L)
                     val downloaded = stats[3].coerceAtLeast(0L)
                     val total = uploaded + downloaded
+                    val statsIntent = Intent(ACTION_STATS).setPackage(packageName).apply {
+                        putExtra(EXTRA_UPLOADED, uploaded)
+                        putExtra(EXTRA_DOWNLOADED, downloaded)
+                    }
+                    sendBroadcast(statsIntent)
                     showStatus("Up " + formatBytes(uploaded) + " • Down " + formatBytes(downloaded) + " • Total " + formatBytes(total))
                 }
             } catch (_: Throwable) {
@@ -181,6 +186,9 @@ class ProxyVpnService : VpnService() {
 
     companion object {
         const val ACTION_STOP = "com.bodex.proxy.STOP"
+        const val ACTION_STATS = "com.bodex.proxy.TRAFFIC_STATS"
+        const val EXTRA_UPLOADED = "uploaded_bytes"
+        const val EXTRA_DOWNLOADED = "downloaded_bytes"
         const val EXTRA_HOST = "host"
         const val EXTRA_PORT = "port"
         const val EXTRA_USERNAME = "username"
