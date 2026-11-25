@@ -1,0 +1,43 @@
+name: Android APK
+on:
+  push:
+    branches: [ main ]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+      - uses: android-actions/setup-android@v3
+      - name: Install Android NDK
+        run: sdkmanager "ndk;27.2.12479018"
+      - name: Build pinned HevSocks5Tunnel native library
+        env:
+          ANDROID_NDK_HOME: ${{ env.ANDROID_HOME }}/ndk/27.2.12479018
+        run: |
+          git clone https://github.com/heiher/hev-socks5-tunnel.git hev-src
+          cd hev-src
+          git checkout 867e1e59dcf30ed75c0ee840991e441539fafb92
+          git submodule update --init --recursive
+          "${ANDROID_NDK_HOME}/ndk-build" NDK_PROJECT_PATH=. APP_BUILD_SCRIPT=Android.mk NDK_APPLICATION_MK=Application.mk
+          cd ..
+          mkdir -p android/app/src/main/jniLibs
+          for abi in armeabi-v7a arm64-v8a x86 x86_64; do
+            mkdir -p "android/app/src/main/jniLibs/$abi"
+            cp "hev-src/libs/$abi/libhev-socks5-tunnel.so" "android/app/src/main/jniLibs/$abi/"
+          done
+      - name: Build debug APK
+        working-directory: android
+        run: |
+          gradle wrapper --gradle-version 8.9
+          ./gradlew --no-daemon assembleDebug
+      - uses: actions/upload-artifact@v4
+        with:
+          name: BODEX-Proxy-debug
+          path: android/app/build/outputs/apk/debug/*.apk
