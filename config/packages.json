@@ -1,0 +1,14 @@
+{
+  "currency": "USD",
+  "unit": "GB",
+  "packages": [
+    {"gb":1,"price":1.90},{"gb":2,"price":3.80},{"gb":3,"price":5.70},
+    {"gb":4,"price":7.60},{"gb":5,"price":9.00},{"gb":6,"price":10.80},
+    {"gb":7,"price":12.60},{"gb":8,"price":14.40},{"gb":9,"price":16.20},
+    {"gb":10,"price":16.00}
+  ],
+  "customPricing": [
+    {"minGb":11,"maxGb":24,"pricePerGb":1.60},
+    {"minGb":25,"pricePerGb":1.50}
+  ]
+}
