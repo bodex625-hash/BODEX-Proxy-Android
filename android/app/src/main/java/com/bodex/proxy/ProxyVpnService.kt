@@ -1,7 +1,11 @@
 package com.bodex.proxy
 
+import android.app.Notification
+import android.app.NotificationChannel
+import android.app.NotificationManager
 import android.content.Intent
 import android.net.VpnService
+import android.os.Build
 import android.os.ParcelFileDescriptor
 import hev.htproxy.TProxyService
 import java.io.File
@@ -13,6 +17,7 @@ class ProxyVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         if (intent?.action == ACTION_STOP) {
             stopTunnel()
+            stopForeground(STOP_FOREGROUND_REMOVE)
             stopSelf()
             return START_NOT_STICKY
         }
@@ -24,11 +29,25 @@ class ProxyVpnService : VpnService() {
             stopSelf()
             return START_NOT_STICKY
         }
+        startForeground(NOTIFICATION_ID, buildNotification())
         Thread {
             try { startTunnel(host, port, username, password) }
-            catch (_: Exception) { stopTunnel(); stopSelf() }
+            catch (_: Exception) { stopTunnel(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
         }.start()
         return START_NOT_STICKY
+    }
+
+    private fun buildNotification(): Notification {
+        val manager = getSystemService(NotificationManager::class.java)
+        if (Build.VERSION.SDK_INT >= 26) {
+            manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "BODEX Proxy", NotificationManager.IMPORTANCE_LOW))
+        }
+        val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL_ID) else Notification.Builder(this)
+        return builder.setContentTitle("BODEX Proxy")
+            .setContentText("SOCKS5 VPN connection is starting")
+            .setSmallIcon(android.R.drawable.stat_sys_warning)
+            .setOngoing(true)
+            .build()
     }
 
     @Synchronized
@@ -36,7 +55,7 @@ class ProxyVpnService : VpnService() {
         if (started) return
         val builder = Builder().setSession("BODEX Proxy").setMtu(1500)
             .addAddress("10.77.0.2", 32).addRoute("0.0.0.0", 0).addDnsServer("1.1.1.1")
-        if (android.os.Build.VERSION.SDK_INT >= 29) builder.setMetered(true)
+        if (Build.VERSION.SDK_INT >= 29) builder.setMetered(true)
         val pfd = builder.establish() ?: error("VPN establish failed")
         tun = pfd
         val config = buildString {
@@ -66,7 +85,7 @@ class ProxyVpnService : VpnService() {
         File(cacheDir, "hev-session.yml").delete()
     }
 
-    override fun onRevoke() { stopTunnel(); stopSelf(); super.onRevoke() }
+    override fun onRevoke() { stopTunnel(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); super.onRevoke() }
     override fun onDestroy() { stopTunnel(); super.onDestroy() }
 
     companion object {
@@ -75,5 +94,7 @@ class ProxyVpnService : VpnService() {
         const val EXTRA_PORT = "port"
         const val EXTRA_USERNAME = "username"
         const val EXTRA_PASSWORD = "password"
+        private const val CHANNEL_ID = "bodex_proxy_vpn"
+        private const val NOTIFICATION_ID = 4101
     }
 }
