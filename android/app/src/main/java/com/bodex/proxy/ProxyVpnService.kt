@@ -4,6 +4,7 @@ import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Intent
+import android.content.pm.PackageManager
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -26,53 +27,90 @@ class ProxyVpnService : VpnService() {
         val username = intent?.getStringExtra(EXTRA_USERNAME).orEmpty()
         val password = intent?.getStringExtra(EXTRA_PASSWORD).orEmpty()
         if (host.isBlank() || port !in 1..65535) {
+            showStatus("Invalid SOCKS5 server or port")
             stopSelf()
             return START_NOT_STICKY
         }
-        startForeground(NOTIFICATION_ID, buildNotification())
+        startForeground(NOTIFICATION_ID, buildNotification("Preparing VPN"))
         Thread {
-            try { startTunnel(host, port, username, password) }
-            catch (_: Exception) { stopTunnel(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf() }
+            try {
+                startTunnel(host, port, username, password)
+                showStatus("VPN engine started; checking traffic")
+            } catch (error: Throwable) {
+                val message = error.message ?: error.javaClass.simpleName
+                stopTunnel()
+                showStatus("Connection failed: $message")
+                stopForeground(STOP_FOREGROUND_REMOVE)
+                stopSelf()
+            }
         }.start()
         return START_NOT_STICKY
     }
 
-    private fun buildNotification(): Notification {
+    private fun buildNotification(message: String): Notification {
         val manager = getSystemService(NotificationManager::class.java)
         if (Build.VERSION.SDK_INT >= 26) {
             manager.createNotificationChannel(NotificationChannel(CHANNEL_ID, "BODEX Proxy", NotificationManager.IMPORTANCE_LOW))
         }
         val builder = if (Build.VERSION.SDK_INT >= 26) Notification.Builder(this, CHANNEL_ID) else Notification.Builder(this)
         return builder.setContentTitle("BODEX Proxy")
-            .setContentText("SOCKS5 VPN connection is starting")
+            .setContentText(message)
             .setSmallIcon(android.R.drawable.stat_sys_warning)
             .setOngoing(true)
             .build()
     }
 
+    private fun showStatus(message: String) {
+        getSystemService(NotificationManager::class.java).notify(NOTIFICATION_ID, buildNotification(message))
+    }
+
     @Synchronized
     private fun startTunnel(host: String, port: Int, username: String, password: String) {
         if (started) return
-        val builder = Builder().setSession("BODEX Proxy").setMtu(1500)
-            .addAddress("10.77.0.2", 32).addRoute("0.0.0.0", 0).addDnsServer("1.1.1.1")
+
+        val builder = Builder()
+            .setSession("BODEX Proxy")
+            .setBlocking(false)
+            .setMtu(1500)
+            .addAddress("10.77.0.2", 32)
+            .addRoute("0.0.0.0", 0)
+            .addDnsServer("1.1.1.1")
+
+        // Keep this app's own sockets outside its VPN. The native SOCKS5
+        // engine must reach the upstream proxy through the physical network.
+        try {
+            builder.addDisallowedApplication(packageName)
+        } catch (_: PackageManager.NameNotFoundException) {
+            error("Could not exclude BODEX Proxy from its own VPN")
+        }
+
         if (Build.VERSION.SDK_INT >= 29) builder.setMetered(true)
-        val pfd = builder.establish() ?: error("VPN establish failed")
+        val pfd = builder.establish() ?: error("Android could not establish the VPN interface")
         tun = pfd
+
+        val logFile = File(cacheDir, "hev-tunnel.log")
         val config = buildString {
-            append("tunnel:\n  mtu: 1500\n  ipv4: 10.77.0.1\n")
-            append("socks5:\n  address: \"").append(yaml(host)).append("\"\n")
-            append("  port: ").append(port).append("\n  udp: 'udp'\n")
-            if (username.isNotEmpty()) append("  username: \"").append(yaml(username)).append("\"\n")
-            if (password.isNotEmpty()) append("  password: \"").append(yaml(password)).append("\"\n")
-            append("misc:\n  log-level: warn\n")
+            append("tunnel:\\n  mtu: 1500\\n  icmp: 'reply'\\n")
+            append("socks5:\\n  address: '").append(yamlSingle(host)).append("'\\n")
+            append("  port: ").append(port).append("\\n  udp: 'udp'\\n")
+            if (username.isNotEmpty()) append("  username: '").append(yamlSingle(username)).append("'\\n")
+            if (password.isNotEmpty()) append("  password: '").append(yamlSingle(password)).append("'\\n")
+            append("misc:\\n  log-file: '").append(yamlSingle(logFile.absolutePath)).append("'\\n")
+            append("  log-level: debug\\n  connect-timeout: 15000\\n")
         }
         val file = File(cacheDir, "hev-session.yml")
         file.writeText(config)
-        check(TProxyService.TProxyStartService(file.absolutePath, pfd.fd)) { "Native tunnel failed to start" }
+
+        check(TProxyService.TProxyStartService(file.absolutePath, pfd.fd)) {
+            "Hev SOCKS5 engine refused to start. Check server, port and credentials."
+        }
         started = true
+        if (!TProxyService.TProxyIsRunning()) {
+            error("Hev engine did not remain running. See hev-tunnel.log")
+        }
     }
 
-    private fun yaml(value: String) = value.replace("\\", "\\\\").replace("\"", "\\\"").replace("\n", "")
+    private fun yamlSingle(value: String) = value.replace("'", "''").replace("\\r", "").replace("\\n", "")
 
     @Synchronized
     private fun stopTunnel() {
@@ -85,8 +123,17 @@ class ProxyVpnService : VpnService() {
         File(cacheDir, "hev-session.yml").delete()
     }
 
-    override fun onRevoke() { stopTunnel(); stopForeground(STOP_FOREGROUND_REMOVE); stopSelf(); super.onRevoke() }
-    override fun onDestroy() { stopTunnel(); super.onDestroy() }
+    override fun onRevoke() {
+        stopTunnel()
+        stopForeground(STOP_FOREGROUND_REMOVE)
+        stopSelf()
+        super.onRevoke()
+    }
+
+    override fun onDestroy() {
+        stopTunnel()
+        super.onDestroy()
+    }
 
     companion object {
         const val ACTION_STOP = "com.bodex.proxy.STOP"
