@@ -1,0 +1,6 @@
+name = "bodex-proxy-api"
+main = "src/index.ts"
+compatibility_date = "2026-11-25"
+
+# Set supplier and payment credentials using Wrangler secrets.
+# Never place API keys in this file.
