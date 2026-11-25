@@ -54,3 +54,7 @@ Setting `socks5.udp: 'udp'` only selects the tunnel's UDP relay mode. It does no
 ## Current status
 
 The app-side JNI declaration is committed. The native `.so` files are not yet built or packaged, and the VPN service is not yet connected to this engine. No APK should be described as operational until the native build and device tests pass.
+
+## VPN routing diagnostic update
+
+The Android service excludes the BODEX Proxy package from its own VPN routes so the native SOCKS5 engine can reach the upstream proxy outside the TUN interface. The generated Hev configuration uses YAML line-oriented entries and writes a debug log to the app cache directory. A successful APK build is not proof of a working proxy: verify the device tunnel, upstream authentication, DNS, and TCP/UDP behavior on a real device before release.
