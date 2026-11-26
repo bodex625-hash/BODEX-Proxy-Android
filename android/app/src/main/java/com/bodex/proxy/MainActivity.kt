@@ -8,88 +8,154 @@ import android.content.IntentFilter
 import android.net.VpnService
 import android.os.Build
 import android.os.Bundle
-import android.view.ViewGroup
-import android.widget.Button
-import android.widget.EditText
-import android.widget.LinearLayout
-import android.widget.TextView
+import android.webkit.CookieManager
+import android.webkit.JavascriptInterface
+import android.webkit.WebChromeClient
+import android.webkit.WebSettings
+import android.webkit.WebView
+import android.webkit.WebViewClient
 import android.widget.Toast
-import java.util.Locale
 
 class MainActivity : Activity() {
-    private lateinit var host: EditText
-    private lateinit var port: EditText
-    private lateinit var username: EditText
-    private lateinit var password: EditText
-    private lateinit var trafficText: TextView
+    private lateinit var web: WebView
     private var receiverRegistered = false
+    private var pendingLogin = ""
+    private var pendingPassword = ""
 
     private val statsReceiver = object : BroadcastReceiver() {
         override fun onReceive(context: Context?, intent: Intent?) {
             if (intent?.action != ProxyVpnService.ACTION_STATS) return
-            val uploaded = intent.getLongExtra(ProxyVpnService.EXTRA_UPLOADED, 0L)
-            val downloaded = intent.getLongExtra(ProxyVpnService.EXTRA_DOWNLOADED, 0L)
-            val total = uploaded + downloaded
-            trafficText.text = "البيانات المرسلة (Up):  ${formatBytes(uploaded)}\n" +
-                "البيانات المستقبلة (Down):  ${formatBytes(downloaded)}\n" +
-                "إجمالي الاستهلاك (Total):  ${formatBytes(total)}"
+            val up = intent.getLongExtra(ProxyVpnService.EXTRA_UPLOADED, 0L)
+            val down = intent.getLongExtra(ProxyVpnService.EXTRA_DOWNLOADED, 0L)
+            web.evaluateJavascript(
+                "window.bodexVpnStats && window.bodexVpnStats($up,$down)", null
+            )
         }
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(32, 40, 32, 32)
+        CookieManager.getInstance().setAcceptCookie(true)
+        web = WebView(this).apply {
+            settings.javaScriptEnabled = true
+            settings.domStorageEnabled = true
+            settings.databaseEnabled = true
+            settings.cacheMode = WebSettings.LOAD_DEFAULT
+            settings.allowFileAccess = false
+            settings.allowContentAccess = false
+            settings.javaScriptCanOpenWindowsAutomatically = false
+            settings.setSupportMultipleWindows(false)
+            webViewClient = object : WebViewClient() {
+                override fun onPageFinished(view: WebView, url: String) {
+                    if (url.startsWith(WORKER_URL)) installVpnControls()
+                }
+                override fun shouldOverrideUrlLoading(view: WebView, url: String): Boolean {
+                    return !url.startsWith(WORKER_URL)
+                }
+            }
+            webChromeClient = WebChromeClient()
+            addJavascriptInterface(NativeBridge(), "BodexNative")
         }
-        fun field(label: String, secret: Boolean = false): EditText {
-            return EditText(this).apply {
-                hint = label
-                if (secret) inputType = 129
-                root.addView(this, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
+        setContentView(web)
+        if (savedInstanceState == null) web.loadUrl("$WORKER_URL/shop")
+        else web.restoreState(savedInstanceState)
+    }
+
+    private fun installVpnControls() {
+        val script = """
+            (function(){
+              if(window.__bodexNativeInstalled) return;
+              window.__bodexNativeInstalled=true;
+              var panel=document.createElement('section');
+              panel.id='bodex-native-vpn';
+              panel.className='panel';
+              panel.innerHTML='<h2>اتصال VPN للجهاز</h2><div id="bodex-vpn-state" class="muted">سجّل الدخول واشترِ باقة أولاً، ثم افتح طلباتي.</div><div id="bodex-vpn-stats" class="muted"></div><button id="bodex-vpn-connect" type="button">اتصال بآخر بروكسي نشط</button><button id="bodex-vpn-disconnect" type="button">قطع الاتصال</button>';
+              var main=document.querySelector('main');
+              if(main) main.insertBefore(panel,main.firstChild);
+              function say(t){var e=document.getElementById('bodex-vpn-state');if(e)e.textContent=t;}
+              window.bodexVpnStats=function(up,down){
+                var e=document.getElementById('bodex-vpn-stats');
+                if(e)e.textContent='رفع: '+(up/1048576).toFixed(1)+' MB | تنزيل: '+(down/1048576).toFixed(1)+' MB';
+              };
+              document.getElementById('bodex-vpn-connect').onclick=async function(){
+                try{
+                  say('جارٍ جلب بيانات آخر طلب مكتمل...');
+                  var r=await fetch('/api/orders',{credentials:'same-origin'});
+                  var d=await r.json();
+                  if(!r.ok)throw Error(d.error||'تعذر جلب الطلبات');
+                  var o=(d.orders||[]).find(x=>x.proxy_login&&x.proxy_password&&x.status==='active');
+                  if(!o)throw Error('لا يوجد بروكسي نشط جاهز. تأكد من اكتمال الدفع والتجهيز.');
+                  window.BodexNative.connect(o.proxy_login,o.proxy_password);
+                  say('تم إرسال طلب تشغيل اتصال SOCKS5...');
+                }catch(e){say(e.message||'حدث خطأ');}
+              };
+              document.getElementById('bodex-vpn-disconnect').onclick=function(){
+                window.BodexNative.disconnect();say('تم طلب قطع اتصال VPN');
+              };
+            })();
+        """.trimIndent()
+        web.evaluateJavascript(script, null)
+    }
+
+    inner class NativeBridge {
+        @JavascriptInterface
+        fun connect(login: String, password: String) {
+            runOnUiThread {
+                if (login.isBlank() || password.isBlank()) {
+                    Toast.makeText(this@MainActivity, "بيانات البروكسي غير مكتملة", Toast.LENGTH_LONG).show()
+                    return@runOnUiThread
+                }
+                pendingLogin = login
+                pendingPassword = password
+                val permission = VpnService.prepare(this@MainActivity)
+                if (permission != null) {
+                    @Suppress("DEPRECATION")
+                    startActivityForResult(permission, VPN_REQUEST)
+                } else startTunnel()
             }
         }
-        root.addView(TextView(this).apply {
-            text = "BODEX Proxy\nResidential SOCKS5"
-            textSize = 24f
-        })
-        trafficText = TextView(this).apply {
-            text = "عداد استهلاك البيانات\nبانتظار اتصال VPN..."
-            textSize = 17f
-            setPadding(0, 28, 0, 28)
-        }
-        root.addView(trafficText, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT)
-        host = field("SOCKS5 server address")
-        port = field("Port")
-        username = field("Username (optional)")
-        password = field("Password (optional)", true)
-        root.addView(Button(this).apply {
-            text = "Connect VPN"
-            setOnClickListener { requestVpn() }
-        })
-        root.addView(Button(this).apply {
-            text = "Disconnect"
-            setOnClickListener {
+
+        @JavascriptInterface
+        fun disconnect() {
+            runOnUiThread {
                 startService(Intent(this@MainActivity, ProxyVpnService::class.java).setAction(ProxyVpnService.ACTION_STOP))
-                trafficText.text = "عداد استهلاك البيانات\nتم طلب قطع الاتصال"
-                Toast.makeText(this@MainActivity, "Disconnect requested", Toast.LENGTH_SHORT).show()
+                Toast.makeText(this@MainActivity, "تم طلب قطع اتصال VPN", Toast.LENGTH_SHORT).show()
             }
-        })
-        setContentView(root)
+        }
+    }
+
+    @Deprecated("Legacy callback for Android compatibility")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (requestCode == VPN_REQUEST) {
+            if (resultCode == RESULT_OK) startTunnel()
+            else Toast.makeText(this, "لم يتم منح إذن VPN", Toast.LENGTH_LONG).show()
+        }
+    }
+
+    private fun startTunnel() {
+        val intent = Intent(this, ProxyVpnService::class.java).apply {
+            putExtra(ProxyVpnService.EXTRA_HOST, SOCKS_HOST)
+            putExtra(ProxyVpnService.EXTRA_PORT, SOCKS_PORT)
+            putExtra(ProxyVpnService.EXTRA_USERNAME, pendingLogin)
+            putExtra(ProxyVpnService.EXTRA_PASSWORD, pendingPassword)
+        }
+        if (Build.VERSION.SDK_INT >= 26) startForegroundService(intent) else startService(intent)
+        Toast.makeText(this, "جارٍ تشغيل اتصال SOCKS5", Toast.LENGTH_SHORT).show()
     }
 
     override fun onResume() {
         super.onResume()
         if (!receiverRegistered) {
             val filter = IntentFilter(ProxyVpnService.ACTION_STATS)
-            if (Build.VERSION.SDK_INT >= 33) {
-                registerReceiver(statsReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
-            } else {
+            if (Build.VERSION.SDK_INT >= 33) registerReceiver(statsReceiver, filter, Context.RECEIVER_NOT_EXPORTED)
+            else {
                 @Suppress("DEPRECATION")
                 registerReceiver(statsReceiver, filter)
             }
             receiverRegistered = true
         }
+        if (::web.isInitialized) web.onResume()
     }
 
     override fun onPause() {
@@ -97,46 +163,32 @@ class MainActivity : Activity() {
             unregisterReceiver(statsReceiver)
             receiverRegistered = false
         }
+        if (::web.isInitialized) web.onPause()
         super.onPause()
     }
 
-    private fun formatBytes(bytes: Long): String {
-        val mb = bytes.coerceAtLeast(0L) / (1024.0 * 1024.0)
-        return if (mb >= 1024.0) String.format(Locale.US, "%.2f GB", mb / 1024.0)
-        else String.format(Locale.US, "%.1f MB", mb)
-    }
-
-    private fun requestVpn() {
-        val address = host.text.toString().trim()
-        val number = port.text.toString().toIntOrNull()
-        if (address.isBlank() || number == null || number !in 1..65535) {
-            Toast.makeText(this, "Enter a valid SOCKS5 address and port", Toast.LENGTH_LONG).show()
-            return
-        }
-        val permission = VpnService.prepare(this)
-        if (permission != null) {
-            @Suppress("DEPRECATION")
-            startActivityForResult(permission, VPN_REQUEST)
-        } else startTunnel()
+    override fun onSaveInstanceState(outState: Bundle) {
+        web.saveState(outState)
+        super.onSaveInstanceState(outState)
     }
 
     @Deprecated("Legacy callback for Android compatibility")
-    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
-        super.onActivityResult(requestCode, resultCode, data)
-        if (requestCode == VPN_REQUEST && resultCode == RESULT_OK) startTunnel()
+    override fun onBackPressed() {
+        if (::web.isInitialized && web.canGoBack()) web.goBack() else super.onBackPressed()
     }
 
-    private fun startTunnel() {
-        val intent = Intent(this, ProxyVpnService::class.java).apply {
-            putExtra(ProxyVpnService.EXTRA_HOST, host.text.toString().trim())
-            putExtra(ProxyVpnService.EXTRA_PORT, port.text.toString().toInt())
-            putExtra(ProxyVpnService.EXTRA_USERNAME, username.text.toString())
-            putExtra(ProxyVpnService.EXTRA_PASSWORD, password.text.toString())
+    override fun onDestroy() {
+        if (::web.isInitialized) {
+            web.removeJavascriptInterface("BodexNative")
+            web.destroy()
         }
-        startService(intent)
-        trafficText.text = "عداد استهلاك البيانات\nجارٍ تشغيل VPN..."
-        Toast.makeText(this, "VPN starting", Toast.LENGTH_SHORT).show()
+        super.onDestroy()
     }
 
-    companion object { private const val VPN_REQUEST = 701 }
+    companion object {
+        private const val VPN_REQUEST = 701
+        private const val WORKER_URL = "https://bodex-proxy-api.bodex625.workers.dev"
+        private const val SOCKS_HOST = "103.152.136.28"
+        private const val SOCKS_PORT = 10000
+    }
 }
